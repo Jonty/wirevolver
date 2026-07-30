@@ -140,7 +140,6 @@ func main() {
 		socks5.WithRule(&socks5.PermitCommand{EnableConnect: true}),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 			t := next()
-			log.Printf("proxying %s via %q", addr, t.name)
 			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
 
