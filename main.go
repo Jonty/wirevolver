@@ -77,61 +77,43 @@ func main() {
 	log.Printf("connected tunnel %q", current.name)
 
 	var mu sync.Mutex
-	cond := sync.NewCond(&mu)
-	idx, count, last, inFlight := 0, 0, time.Now(), 0
+	idx, count, last := 0, 0, time.Now()
 
-	rotateIfDue := func() {
-		for {
-			idleDue := *rotateIdle > 0 && time.Since(last) >= *rotateIdle
-			countDue := *rotateEvery > 0 && count >= *rotateEvery
-			if !idleDue && !countDue {
-				return
-			}
-
-			if inFlight > 0 {
-				cond.Wait()
-				continue
-			}
-
-			reason := "request count"
-			if idleDue {
-				reason = "idle"
-			}
-
-			current.dev.Close()
-			idx = (idx + 1) % len(configs)
-			t, err := connectTunnel(configs[idx])
-			if err != nil {
-				log.Fatalf("%s: %v", configs[idx].name, err)
-			}
-
-			current = t
-			count = 0
-			last = time.Now()
-			log.Printf("rotated to tunnel %q (%s)", current.name, reason)
-			return
+	rotate := func(reason string) {
+		log.Printf("rotating tunnel: %s", reason)
+		current.dev.Close()
+		idx = (idx + 1) % len(configs)
+		t, err := connectTunnel(configs[idx])
+		if err != nil {
+			log.Fatalf("%s: %v", configs[idx].name, err)
 		}
+
+		current = t
+		count = 0
+		last = time.Now()
+		log.Printf("rotated to tunnel %q", current.name)
 	}
 
 	next := func() *Tunnel {
 		mu.Lock()
 		defer mu.Unlock()
 
-		rotateIfDue()
+		switch {
+		case *rotateIdle > 0 && time.Since(last) >= *rotateIdle:
+			rotate("idle")
+		case *rotateEvery > 0 && count >= *rotateEvery:
+			rotate("request count")
+		}
 
 		last = time.Now()
 		count++
-		inFlight++
 
 		return current
 	}
 
-	release := func() {
+	dialFailed := func() {
 		mu.Lock()
-		inFlight--
-		if inFlight == 0 {
-			cond.Broadcast()
-		}
+		rotate("dial failed")
 		mu.Unlock()
 	}
 
@@ -145,11 +127,12 @@ func main() {
 
 			c, err := t.net.DialContext(dialCtx, network, addr)
 			if err != nil {
-				release()
+				log.Printf("dial %s via %q failed: %v", addr, t.name, err)
+				dialFailed()
 				return nil, err
 			}
 
-			return &releaseOnClose{Conn: c, release: release}, nil
+			return c, nil
 		}),
 	)
 
@@ -161,18 +144,6 @@ type passthroughResolver struct{}
 
 func (passthroughResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
 	return ctx, nil, nil
-}
-
-type releaseOnClose struct {
-	net.Conn
-	once    sync.Once
-	release func()
-}
-
-func (c *releaseOnClose) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(c.release)
-	return err
 }
 
 func parseConfig(name, path string) (*tunnelConfig, error) {
