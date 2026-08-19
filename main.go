@@ -111,10 +111,11 @@ func main() {
 		return current
 	}
 
-	dialFailed := func() {
+	rotateOnFail := func() *Tunnel {
 		mu.Lock()
+		defer mu.Unlock()
 		rotate("dial failed")
-		mu.Unlock()
+		return current
 	}
 
 	srv := socks5.NewServer(
@@ -122,17 +123,22 @@ func main() {
 		socks5.WithRule(&socks5.PermitCommand{EnableConnect: true}),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 			t := next()
-			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
 
-			c, err := t.net.DialContext(dialCtx, network, addr)
-			if err != nil {
+			var lastErr error
+			for attempt := 0; attempt < len(configs); attempt++ {
+				dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				c, err := t.net.DialContext(dialCtx, network, addr)
+				cancel()
+				if err == nil {
+					return c, nil
+				}
+
 				log.Printf("dial %s via %q failed: %v", addr, t.name, err)
-				dialFailed()
-				return nil, err
+				lastErr = err
+				t = rotateOnFail()
 			}
 
-			return c, nil
+			return nil, lastErr
 		}),
 	)
 
